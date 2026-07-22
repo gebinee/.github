@@ -98,6 +98,17 @@ jobs:
         with:
           node-version: lts/*
 
+      - name: Normalize release notes (convert \n to real newlines)
+        env:
+          RAW_RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          normalized=$(printf '%b' "${RAW_RELEASE_NOTES}")
+          {
+              echo 'RELEASE_NOTES<<EOF'
+              printf '%s\n' "${normalized}"
+              echo 'EOF'
+          } >> "$GITHUB_ENV"
+
       - name: Generate release notes
         run: |
           node << 'EOF'
