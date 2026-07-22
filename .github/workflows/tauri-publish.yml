@@ -1,0 +1,207 @@
+#file: noinspection SpellCheckingInspection
+name: Tauri Publish
+
+# 可复用工作流：创建 GitHub 发行版、生成 latest.json、同步至 gebinee/update-info 仓库
+on:
+  workflow_call:
+    inputs:
+      version_number:
+        description: 'Version number'
+        type: string
+        required: true
+      release_notes:
+        description: 'Release notes'
+        type: string
+        required: true
+      is_latest:
+        description: 'Mark as latest release'
+        type: boolean
+        required: true
+      product_name:
+        description: 'Product name'
+        type: string
+        required: true
+      repo_name:
+        description: 'Name of consumer repository'
+        type: string
+        required: true
+      build_run_id:
+        description: 'Run ID in step Tauri Build'
+        type: string
+        required: false
+        default: ''
+    secrets:
+      UPDATE_INFO_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    name: Publish (create release, generate JSON, sync)
+    runs-on: ubuntu-latest
+    env:
+      NEW_VERSION: ${{ inputs.version_number }}
+      TAG_NAME: v${{ inputs.version_number }}
+      RELEASE_NOTES: ${{ inputs.release_notes }}
+      IS_LATEST: ${{ inputs.is_latest }}
+      PRODUCT_NAME: ${{ inputs.product_name }}
+      REPO_NAME: ${{ inputs.repo_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+    steps:
+      - name: Download artifacts (current run)
+        if: env.BUILD_RUN_ID == ''
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Download artifacts (from specified build run)
+        if: env.BUILD_RUN_ID != ''
+        run: |
+          echo "Downloading artifacts from run ${BUILD_RUN_ID}..."
+          gh run download "${BUILD_RUN_ID}" \
+              --repo "gebinee/${REPO_NAME}" \
+              --dir artifacts \
+              --pattern 'artifacts-*'
+
+      - name: List downloaded artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find artifacts -type f | sort
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - name: Create GitHub release
+        run: |
+          printf '%s' "${RELEASE_NOTES}" > /tmp/release-notes.md
+          LATEST_FLAG="--latest"
+          if [ "$IS_LATEST" != "true" ]; then LATEST_FLAG="--no-latest"; fi
+          gh release create "${TAG_NAME}" \
+              --repo "gebinee/${REPO_NAME}" \
+              --title "${PRODUCT_NAME} v${NEW_VERSION}" \
+              --notes-file /tmp/release-notes.md \
+              $LATEST_FLAG
+
+      - name: Rename macOS updater bundles with arch suffix
+        run: |
+          # Tauri 生成的 .app.tar.gz 不带架构后缀，两个 darwin 架构同名会导致上传冲突
+          for arch in x86_64 aarch64; do
+              dir="artifacts/artifacts-darwin-${arch}/macos"
+              if [ -d "$dir" ]; then
+                  for f in "$dir"/*.app.tar.gz; do
+                      [ -f "$f" ] || continue
+                      base=$(basename "$f" .app.tar.gz)
+                      mv "$f" "$dir/${base}_${NEW_VERSION}_${arch}.app.tar.gz"
+                  done
+                  for f in "$dir"/*.app.tar.gz.sig; do
+                      [ -f "$f" ] || continue
+                      base=$(basename "$f" .app.tar.gz.sig)
+                      mv "$f" "$dir/${base}_${NEW_VERSION}_${arch}.app.tar.gz.sig"
+                  done
+              fi
+          done
+          echo "Renamed macOS updater bundles:"
+          find artifacts -name '*.app.tar.gz*' -type f | sort
+
+      - name: Upload installer assets
+        run: |
+          find artifacts -type f ! -name '*.sig' -print0 \
+              | xargs -0 gh release upload "${TAG_NAME}" \
+              --repo "gebinee/${REPO_NAME}"
+
+      - name: Generate latest.json and latest-proxy.json
+        run: |
+          node << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          const version = process.env.NEW_VERSION;
+          const notes = process.env.RELEASE_NOTES;
+          const pubDate = new Date().toISOString();
+          const artifactsDir = 'artifacts';
+          const owner = 'gebinee';
+          const repo = process.env.REPO_NAME;
+
+          // 每个平台目录下只有一种更新器兼容格式，按扩展名匹配即可，无需依赖 arch 后缀命名
+          // Windows: .exe（NSIS 安装包，更新器兼容）
+          // Linux:   .AppImage（更新器兼容）
+          // macOS:   .app.tar.gz（更新器兼容）
+          // 每个 .sig 签名文件与其对应的安装包同名加 .sig 后缀
+          const platformMap = {
+              'windows-x86_64':   { installerExt: /\.exe$/,          sigExt: /\.exe\.sig$/ },
+              'windows-aarch64':  { installerExt: /\.exe$/,          sigExt: /\.exe\.sig$/ },
+              'linux-x86_64':     { installerExt: /\.AppImage$/,     sigExt: /\.AppImage\.sig$/ },
+              'linux-aarch64':    { installerExt: /\.AppImage$/,     sigExt: /\.AppImage\.sig$/ },
+              'darwin-x86_64':    { installerExt: /\.app\.tar\.gz$/, sigExt: /\.app\.tar\.gz\.sig$/ },
+              'darwin-aarch64':   { installerExt: /\.app\.tar\.gz$/, sigExt: /\.app\.tar\.gz\.sig$/ },
+          };
+
+          // 在指定目录下递归查找匹配某个正则的文件；可选排除另一个正则（避免 .exe 匹配到 .exe.sig）
+          function findFile(dir, matchExt, excludeExt) {
+              const entries = fs.readdirSync(dir, { withFileTypes: true });
+              for (const entry of entries) {
+                  const fullPath = path.join(dir, entry.name);
+                  if (entry.isDirectory()) {
+                      const found = findFile(fullPath, matchExt, excludeExt);
+                      if (found) return found;
+                  } else if (matchExt.test(entry.name) && (!excludeExt || !excludeExt.test(entry.name))) {
+                      return fullPath;
+                  }
+              }
+              return null;
+          }
+
+          const platforms = {};
+          for (const [platformKey, patterns] of Object.entries(platformMap)) {
+              const platformDir = path.join(artifactsDir, `artifacts-${platformKey}`);
+              if (!fs.existsSync(platformDir)) {
+                  console.error(`Artifact directory missing for ${platformKey}: ${platformDir}`);
+                  process.exit(1);
+              }
+              // 匹配安装包时排除 .sig 文件（.exe 正则会同时匹配 xxx.exe 和 xxx.exe.sig）
+              const installerPath = findFile(platformDir, patterns.installerExt, patterns.sigExt);
+              const sigPath = findFile(platformDir, patterns.sigExt);
+              if (!installerPath) {
+                  console.error(`Missing installer for ${platformKey} (ext pattern: ${patterns.installerExt})`);
+                  process.exit(1);
+              }
+              if (!sigPath) {
+                  console.error(`Missing signature for ${platformKey} (ext pattern: ${patterns.sigExt})`);
+                  process.exit(1);
+              }
+              const installerFilename = path.basename(installerPath);
+              const signature = fs.readFileSync(sigPath, 'utf8').trim();
+              const url = `https://github.com/${owner}/${repo}/releases/download/v${version}/${installerFilename}`;
+              platforms[platformKey] = { signature, url };
+              console.log(`${platformKey}: ${installerFilename}`);
+          }
+          const latest = { version, notes, pub_date: pubDate, platforms };
+          fs.writeFileSync('latest.json', JSON.stringify(latest, null, 2) + '\n');
+          const latestProxy = JSON.parse(JSON.stringify(latest));
+          for (const key of Object.keys(latestProxy.platforms)) {
+              latestProxy.platforms[key].url = 'https://gh-proxy.org/' + latestProxy.platforms[key].url;
+          }
+          fs.writeFileSync('latest-proxy.json', JSON.stringify(latestProxy, null, 2) + '\n');
+          console.log('Generated latest.json and latest-proxy.json');
+          EOF
+
+      - name: Upload latest.json and latest-proxy.json to gebinee/update-info
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_INFO_TOKEN }}
+        run: |
+          gh repo clone gebinee/update-info update-info-repo
+          cd update-info-repo
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh release upload "${REPO_NAME}" ../latest.json ../latest-proxy.json --clobber
+          mkdir -p "${REPO_NAME}/v${NEW_VERSION}"
+          cp ../latest.json ../latest-proxy.json "${REPO_NAME}/v${NEW_VERSION}/"
+          git add "${REPO_NAME}/v${NEW_VERSION}/latest.json" "${REPO_NAME}/v${NEW_VERSION}/latest-proxy.json"
+          git commit -m "chore(${REPO_NAME}): release v${NEW_VERSION}"
+          git push origin main

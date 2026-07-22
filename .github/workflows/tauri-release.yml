@@ -1,0 +1,74 @@
+#file: noinspection SpellCheckingInspection
+name: Tauri Release
+
+# 可复用编排器：串联 prepare → build → publish 三个子工作流
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Version branch'
+        type: string
+        required: true
+      version_bump:
+        description: 'Version increment options'
+        type: string
+        required: true
+      release_notes:
+        description: 'Release notes'
+        type: string
+        required: true
+      is_latest:
+        description: 'Mark as latest release'
+        type: boolean
+        required: true
+      product_name:
+        description: 'Product name'
+        type: string
+        required: true
+      repo_name:
+        description: 'Name of consumer repository'
+        type: string
+        required: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: true
+      APPLE_CERTIFICATE:
+        required: true
+      APPLE_CERTIFICATE_PASSWORD:
+        required: true
+      KEYCHAIN_PASSWORD:
+        required: true
+      APPLE_API_ISSUER:
+        required: true
+      APPLE_API_KEY:
+        required: true
+      APPLE_API_KEY_FILE:
+        required: true
+      GPG_PRIVATE_KEY:
+        required: true
+      GPG_SIGN_KEY_ID:
+        required: true
+      GPG_SIGN_PASSPHRASE:
+        required: true
+      UPDATE_INFO_TOKEN:
+        required: true
+
+jobs:
+  prepare:
+    uses: ./.github/workflows/tauri-prepare.yml
+    with:
+      branch: ${{ inputs.branch }}
+      version_bump: ${{ inputs.version_bump }}
+
+  build-and-publish:
+    needs: [prepare]
+    uses: ./.github/workflows/tauri-build-and-publish.yml
+    with:
+      version_number: ${{ needs.prepare.outputs.new_version }}
+      release_notes: ${{ inputs.release_notes }}
+      is_latest: ${{ inputs.is_latest }}
+      product_name: ${{ inputs.product_name }}
+      repo_name: ${{ inputs.repo_name }}
+    secrets: inherit
