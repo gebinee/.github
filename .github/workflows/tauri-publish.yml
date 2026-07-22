@@ -102,7 +102,7 @@ jobs:
         env:
           RAW_RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
-          normalized=$(printf '%b' "${RAW_RELEASE_NOTES}")
+          normalized=$(printf '%s' "${RAW_RELEASE_NOTES}" | sed 's/\\n/\n/g')
           {
               echo 'RELEASE_NOTES<<EOF'
               printf '%s\n' "${normalized}"
