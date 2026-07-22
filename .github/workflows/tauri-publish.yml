@@ -72,22 +72,6 @@ jobs:
           echo "Downloaded artifacts:"
           find artifacts -type f | sort
 
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: lts/*
-
-      - name: Create GitHub release
-        run: |
-          printf '%s' "${RELEASE_NOTES}" > /tmp/release-notes.md
-          LATEST_FLAG="--latest"
-          if [ "$IS_LATEST" != "true" ]; then LATEST_FLAG="--no-latest"; fi
-          gh release create "${TAG_NAME}" \
-              --repo "gebinee/${REPO_NAME}" \
-              --title "${PRODUCT_NAME} v${NEW_VERSION}" \
-              --notes-file /tmp/release-notes.md \
-              $LATEST_FLAG
-
       - name: Rename macOS updater bundles with arch suffix
         run: |
           # Tauri 生成的 .app.tar.gz 不带架构后缀，两个 darwin 架构同名会导致上传冲突
@@ -108,6 +92,94 @@ jobs:
           done
           echo "Renamed macOS updater bundles:"
           find artifacts -name '*.app.tar.gz*' -type f | sort
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - name: Generate release notes
+        run: |
+          node << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const version = process.env.NEW_VERSION;
+          const repoName = process.env.REPO_NAME;
+          const owner = 'gebinee';
+          const userNotes = process.env.RELEASE_NOTES;
+          const artifactsDir = 'artifacts';
+
+          function formatSize(bytes) {
+              return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+          }
+
+          function findFile(dir, matchFn) {
+              function walk(d) {
+                  const entries = fs.readdirSync(d, { withFileTypes: true });
+                  for (const entry of entries) {
+                      const fullPath = path.join(d, entry.name);
+                      if (entry.isDirectory()) {
+                          const found = walk(fullPath);
+                          if (found) return found;
+                      } else if (matchFn(entry.name)) {
+                          return fullPath;
+                      }
+                  }
+                  return null;
+              }
+              return walk(dir);
+          }
+
+          const items = [
+              { section: '🪟 Windows', label: 'x64 Installer',      linkText: 'windows-x64-setup.exe',       match: f => f.endsWith('-setup.exe') && f.includes('x64') },
+              { section: '🪟 Windows', label: 'ARM64 Installer',    linkText: 'windows-arm64-setup.exe',     match: f => f.endsWith('-setup.exe') && f.includes('arm64') },
+              { section: '🍎 macOS',   label: 'ARM64 DMG Installer',      linkText: 'macos-aarch64.dmg',           match: f => f.endsWith('.dmg') && f.includes('aarch64') },
+              { section: '🍎 macOS',   label: 'x64 DMG Installer',        linkText: 'macos-x64.dmg',               match: f => f.endsWith('.dmg') && f.includes('x64') },
+              { section: '🍎 macOS',   label: 'ARM64 Compressed Archive', linkText: 'macos-aarch64.app.tar.gz',    match: f => f.endsWith('.app.tar.gz') && f.includes('aarch64') },
+              { section: '🍎 macOS',   label: 'x64 Compressed Archive',   linkText: 'macos-x86_64.app.tar.gz',     match: f => f.endsWith('.app.tar.gz') && f.includes('x86_64') },
+              { section: '🐧 Linux',   label: 'x64 AppImage File',   linkText: 'linux-amd64.AppImage',    match: f => f.endsWith('.AppImage') && f.includes('amd64') },
+              { section: '🐧 Linux',   label: 'ARM64 AppImage File', linkText: 'linux-aarch64.AppImage',  match: f => f.endsWith('.AppImage') && f.includes('aarch64') },
+          ];
+
+          let markdown = `## 版本说明\n${userNotes}\n\n## 下载地址\n`;
+
+          let currentSection = '';
+          for (const item of items) {
+              if (item.section !== currentSection) {
+                  if (currentSection) markdown += '\n';
+                  currentSection = item.section;
+                  markdown += `### ${item.section}\n`;
+                  markdown += `|Product|File Size|Download|\n|:---|:---|:---|\n`;
+              }
+              const filePath = findFile(artifactsDir, item.match);
+              if (filePath) {
+                  const fileName = path.basename(filePath);
+                  const size = formatSize(fs.statSync(filePath).size);
+                  const url = `https://github.com/${owner}/${repoName}/releases/download/v${version}/${fileName}`;
+                  markdown += `|${item.label}|${size}|[${item.linkText}](${url})|\n`;
+              } else {
+                  markdown += `|${item.label}|-|*Not available*|\n`;
+              }
+          }
+
+          fs.writeFileSync('/tmp/release-notes.md', markdown);
+          console.log('Generated release notes:');
+          console.log(markdown);
+          EOF
+
+      - name: Create GitHub release
+        run: |
+          echo "## 版本说明" > /tmp/release-notes.md
+          printf '%s' "${RELEASE_NOTES}" >> /tmp/release-notes.md
+          echo "\n## 下载地址\n### Windows"
+          LATEST_FLAG="--latest"
+          if [ "$IS_LATEST" != "true" ]; then LATEST_FLAG="--no-latest"; fi
+          gh release create "${TAG_NAME}" \
+              --repo "gebinee/${REPO_NAME}" \
+              --title "${PRODUCT_NAME} v${NEW_VERSION}" \
+              --notes-file /tmp/release-notes.md \
+              $LATEST_FLAG
 
       - name: Upload installer assets
         run: |
