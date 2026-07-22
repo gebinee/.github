@@ -170,9 +170,6 @@ jobs:
 
       - name: Create GitHub release
         run: |
-          echo "## 版本说明" > /tmp/release-notes.md
-          printf '%s' "${RELEASE_NOTES}" >> /tmp/release-notes.md
-          echo "\n## 下载地址\n### Windows"
           LATEST_FLAG="--latest"
           if [ "$IS_LATEST" != "true" ]; then LATEST_FLAG="--no-latest"; fi
           gh release create "${TAG_NAME}" \
