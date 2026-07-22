@@ -147,7 +147,7 @@ jobs:
               doc = tomlkit.parse(f.read())
           if doc['package']['version'] != '${NEW_VERSION}':
               raise ValueError('Cargo.toml version mismatch')
-          print("✓ Cargo.toml")
+          print('✓ Cargo.toml')
           "
           echo "All version files synced to ${NEW_VERSION}"
           echo "Didn't check Cargo.lock, but it won't influence building"
