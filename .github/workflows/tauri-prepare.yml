@@ -40,6 +40,9 @@ jobs:
         with:
           node-version: lts/*
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
@@ -87,43 +90,72 @@ jobs:
           console.log(`New version: ${newVersion}`);
           EOF
 
-      - name: Update Cargo.toml version
-        env:
-          NEW_VERSION: ${{ steps.compute_version.outputs.new_version }}
-        run: |
-          python -c "
-          import tomlkit
-          with open('src-tauri/Cargo.toml', 'r', encoding='utf-8') as f:
-              doc = tomlkit.parse(f.read())
-          doc['package']['version'] = '${NEW_VERSION}'
-          with open('src-tauri/Cargo.toml', 'w', encoding='utf-8') as f:
-              f.write(tomlkit.dumps(doc))
-          print(f'Cargo.toml version updated to {doc[\"package\"][\"version\"]}')
-          "
-
       - name: Sync package-lock.json
         run: npm install --package-lock-only
 
-      - name: Verify version sync
+      - name: Update Cargo.toml version and sync Cargo.lock
         env:
           NEW_VERSION: ${{ steps.compute_version.outputs.new_version }}
         run: |
-          echo "Verifying version sync..."
-          node -e "const t=JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8'));if(t.version!==process.env.NEW_VERSION)throw new Error('tauri.conf.json version mismatch')"
-          node -e "const p=JSON.parse(require('fs').readFileSync('package.json','utf8'));if(p.version!==process.env.NEW_VERSION)throw new Error('package.json version mismatch')"
-          node -e "const l=JSON.parse(require('fs').readFileSync('package-lock.json','utf8'));if(l.version!==process.env.NEW_VERSION)throw new Error('package-lock.json version mismatch');if(l.packages[''].version!==process.env.NEW_VERSION)throw new Error('package-lock.json packages[\"\"] version mismatch')"
-          grep -E "^version = \"${NEW_VERSION}\"" src-tauri/Cargo.toml || { echo "Cargo.toml version not found"; exit 1; }
-          echo "All version files synced to ${NEW_VERSION}"
+          cd src-tauri
+          python -c "
+          import tomlkit
+          with open('Cargo.toml', 'r', encoding='utf-8') as f:
+              doc = tomlkit.parse(f.read())
+          doc['package']['version'] = '${NEW_VERSION}'
+          with open('Cargo.toml', 'w', encoding='utf-8') as f:
+              f.write(tomlkit.dumps(doc))
+          print(f'Cargo.toml version updated to {doc[\"package\"][\"version\"]}')
+          "
+          cargo update
 
-      - name: Commit and push
+      - name: Commit
         env:
           NEW_VERSION: ${{ steps.compute_version.outputs.new_version }}
           BRANCH: ${{ inputs.branch }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src-tauri/tauri.conf.json src-tauri/Cargo.toml package.json package-lock.json
+          git add src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock \
+              package.json package-lock.json
           git commit -m "chore(release): v${NEW_VERSION}"
+
+      - name: Verify version sync
+        env:
+          NEW_VERSION: ${{ steps.compute_version.outputs.new_version }}
+        run: |
+          echo "Verifying version sync..."
+          node << 'EOF'
+          const t = JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          if (t.version !== process.env.NEW_VERSION)
+              throw new Error('tauri.conf.json version mismatch')
+          console.log(`✓ tauri.conf.json`);
+          const p = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+          if (p.version !== process.env.NEW_VERSION)
+              throw new Error('package.json version mismatch')
+          console.log(`✓ package.json`);
+          const l = JSON.parse(require('fs').readFileSync('package-lock.json', 'utf8'));
+          if (l.version !== process.env.NEW_VERSION)
+              throw new Error('package-lock.json version mismatch');
+          if (l.packages[''].version !== process.env.NEW_VERSION)
+              throw new Error('package-lock.json packages[\"\"] version mismatch')
+          console.log(`✓ package-lock.json`);
+          EOF
+          python -c "
+          import tomlkit
+          with open('src-tauri/Cargo.toml', 'r', encoding='utf-8') as f:
+              doc = tomlkit.parse(f.read())
+          if doc['package']['version'] != '${NEW_VERSION}':
+              raise ValueError('Cargo.toml version mismatch')
+          print("✓ Cargo.toml")
+          "
+          echo "All version files synced to ${NEW_VERSION}"
+          echo "Didn't check Cargo.lock, but it won't influence building"
+
+      - name: Push
+        env:
+          BRANCH: ${{ inputs.branch }}
+        run: |
           git push origin "HEAD:${BRANCH}"
 
       - name: Create and push tag
